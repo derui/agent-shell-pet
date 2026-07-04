@@ -904,6 +904,7 @@ installs to Codex; otherwise use `agent-shell-pet-install-target'."
     (setf (agent-shell-pet--runtime-child-buffer runtime) buffer)
     (with-current-buffer buffer
       (setq-local mode-line-format nil)
+      (setq-local header-line-format nil)
       (setq-local cursor-type nil)
       (setq-local truncate-lines t)
       (setq-local inhibit-read-only t))
@@ -925,8 +926,8 @@ installs to Codex; otherwise use `agent-shell-pet-install-target'."
                    (visibility . nil)
                    (left . ,(car pos))
                    (top . ,(cdr pos))
-                   (width . ,(car size))
-                   (height . ,(cdr size))
+                   (width . (text-pixels . ,(car size)))
+                   (height . (text-pixels . ,(cdr size)))
                    (user-position . t)
                    (drag-internal-border . t)
                    (internal-border-width . 0)
