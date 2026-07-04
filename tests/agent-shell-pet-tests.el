@@ -986,6 +986,56 @@ non-Lisp resources this way."
           (should-not set-frame-calls))
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
+(ert-deftest agent-shell-pet-test-current-frame-path-uses-animated-webp-for-child-frame ()
+  (let* ((pet (agent-shell-pet--make
+               :id "sprout"
+               :display-name "Sprout"
+               :directory "/tmp/sprout"
+               :spritesheet-path "/tmp/sprout/spritesheet.webp"))
+         (runtime (agent-shell-pet--make-runtime
+                   :pet pet
+                   :shell-buffer (current-buffer)
+                   :renderer 'child-frame
+                   :state 'idle
+                   :status-text nil
+                   :frame-index 3)))
+    (cl-letf (((symbol-function 'image-type-available-p)
+               (lambda (type) (eq type 'webp)))
+              ((symbol-function 'agent-shell-pet--ensure-state-animation-cache)
+               (lambda (&rest _) "/tmp/sprout/idle/idle.webp"))
+              ((symbol-function 'agent-shell-pet--extract-frame)
+               (lambda (&rest _)
+                 (ert-fail "child-frame render path should not use PNG frame extraction"))))
+      (should (equal (agent-shell-pet--current-frame-path runtime)
+                     "/tmp/sprout/idle/idle.webp")))))
+
+(ert-deftest agent-shell-pet-test-schedule-next-frame-skips-child-frame-webp-animation ()
+  (let* ((pet (agent-shell-pet--make
+               :id "sprout"
+               :display-name "Sprout"
+               :directory "/tmp/sprout"
+               :spritesheet-path "/tmp/sprout/spritesheet.webp"))
+         (timer-called nil)
+         (runtime nil))
+    (cl-letf (((symbol-function 'image-type-available-p)
+               (lambda (type) (eq type 'webp)))
+              ((symbol-function 'run-at-time)
+               (lambda (&rest _args)
+                 (setq timer-called t)
+                 'unexpected-timer)))
+      (with-temp-buffer
+        (setq runtime
+              (agent-shell-pet--make-runtime
+               :pet pet
+               :shell-buffer (current-buffer)
+               :renderer 'child-frame
+               :state 'idle
+               :status-text nil
+               :frame-index 0))
+        (agent-shell-pet--schedule-next-frame runtime)
+        (should-not timer-called)
+        (should-not (agent-shell-pet--runtime-timer runtime))))))
+
 (provide 'agent-shell-pet-tests)
 
 ;;; agent-shell-pet-tests.el ends here
