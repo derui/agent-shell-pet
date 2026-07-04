@@ -109,7 +109,7 @@ When nil, use the first discovered custom pet."
 
 (defcustom agent-shell-pet-cache-directory
   (expand-file-name "agent-shell-pet/cache/" user-emacs-directory)
-  "Directory where extracted pet frames are cached."
+  "Directory where extracted pet frames and animations are cached."
   :type 'directory
   :group 'agent-shell-pet)
 
@@ -734,6 +734,19 @@ installs to Codex; otherwise use `agent-shell-pet-install-target'."
            index)
    agent-shell-pet-cache-directory))
 
+(defun agent-shell-pet--state-animation-path (pet state)
+  "Return cached animated WebP path for PET STATE."
+  (expand-file-name
+   (format "%s/%s/%s.webp"
+           (agent-shell-pet--cache-key pet)
+           (symbol-name state)
+           (symbol-name state))
+   agent-shell-pet-cache-directory))
+
+(defun agent-shell-pet--animation-delay (milliseconds)
+  "Return ImageMagick delay units for MILLISECONDS."
+  (max 1 (round (/ (float milliseconds) 10.0))))
+
 (defun agent-shell-pet--extract-frame (pet state index)
   "Extract PET STATE INDEX to the frame cache."
   (let* ((row (agent-shell-pet--state-row state))
@@ -760,12 +773,46 @@ installs to Codex; otherwise use `agent-shell-pet-install-target'."
                     agent-shell-pet-frame-extractor-command)))
     output))
 
+(defun agent-shell-pet--ensure-state-animation-cache (pet state)
+  "Ensure PET STATE has a cached animated WebP."
+  (let ((output (agent-shell-pet--state-animation-path pet state)))
+    (unless (file-exists-p output)
+      (unless (executable-find agent-shell-pet-frame-extractor-command)
+        (user-error "ImageMagick command not found: %s"
+                    agent-shell-pet-frame-extractor-command))
+      (let* ((durations (agent-shell-pet--state-durations state))
+             (frames (cl-loop for index below (length durations)
+                              collect (agent-shell-pet--frame-path pet state index)))
+             (temp-output (make-temp-file "agent-shell-pet-animation" nil ".webp"))
+             (args (append
+                    (cl-loop for frame in frames
+                             for duration in durations
+                             append (list "-delay"
+                                          (number-to-string
+                                           (agent-shell-pet--animation-delay duration))
+                                          frame))
+                    (list "-loop" "0" temp-output))))
+        (unwind-protect
+            (progn
+              (unless (zerop (apply #'call-process
+                                    agent-shell-pet-frame-extractor-command
+                                    nil nil nil
+                                    args))
+                (user-error "Failed to build pet animation with %s"
+                            agent-shell-pet-frame-extractor-command))
+              (rename-file temp-output output t))
+          (when (file-exists-p temp-output)
+            (ignore-errors (delete-file temp-output))))))
+    output))
+
 (defun agent-shell-pet--ensure-frame-cache (pet)
-  "Ensure all configured PET frames are extracted."
+  "Ensure cached render assets exist for PET."
   (dolist (state agent-shell-pet-enabled-states)
     (let ((durations (agent-shell-pet--state-durations state)))
       (cl-loop for index below (length durations)
-               do (agent-shell-pet--extract-frame pet state index)))))
+               do (agent-shell-pet--extract-frame pet state index))
+      (when (image-type-available-p 'webp)
+        (agent-shell-pet--ensure-state-animation-cache pet state)))))
 
 (defun agent-shell-pet--renderer-show (runtime)
   "Show RUNTIME using the configured renderer."
@@ -931,9 +978,14 @@ installs to Codex; otherwise use `agent-shell-pet-install-target'."
              (propertize label
                          'face 'agent-shell-pet-speech-bubble))
             (insert "\n")))
-        (insert-image (create-image frame-file 'png nil
-                                    :width (car size)
-                                    :height (cdr size)))))))
+        (let* ((image (or (create-image frame-file nil nil
+                                        :width (car size)
+                                        :height (cdr size))
+                          (user-error "Failed to create image from %s" frame-file)))
+               (position (point)))
+          (insert-image image)
+          (when (image-multi-frame-p image)
+            (image-animate image 0 t position)))))))
 
 (defun agent-shell-pet--macos-helper-live-p (runtime)
   "Return non-nil when RUNTIME has a live macOS helper process."
@@ -1227,13 +1279,18 @@ sources)."
        (notifications . ,(or notifications []))))))
 
 (defun agent-shell-pet--current-frame-path (runtime)
-  "Return the image path for RUNTIME's current frame."
+  "Return the cached image path for RUNTIME's current state."
   (unless (agent-shell-pet--runtime-live-p runtime)
     (error "Stale or invalid agent-shell-pet runtime"))
-  (agent-shell-pet--extract-frame
-   (agent-shell-pet--runtime-pet runtime)
-   (agent-shell-pet--runtime-state runtime)
-   (agent-shell-pet--runtime-frame-index runtime)))
+  (if (and (eq (agent-shell-pet--runtime-renderer runtime) 'child-frame)
+           (image-type-available-p 'webp))
+      (agent-shell-pet--ensure-state-animation-cache
+       (agent-shell-pet--runtime-pet runtime)
+       (agent-shell-pet--runtime-state runtime))
+    (agent-shell-pet--extract-frame
+     (agent-shell-pet--runtime-pet runtime)
+     (agent-shell-pet--runtime-state runtime)
+     (agent-shell-pet--runtime-frame-index runtime))))
 
 (defun agent-shell-pet--cancel-animation (runtime)
   "Cancel RUNTIME animation timer."
@@ -1260,13 +1317,15 @@ sources)."
   "Schedule RUNTIME's next animation frame."
   (when (agent-shell-pet--runtime-live-p runtime)
     (agent-shell-pet--cancel-animation runtime)
-    (let* ((durations (agent-shell-pet--state-durations
-                       (agent-shell-pet--runtime-state runtime)))
-           (index (min (agent-shell-pet--runtime-frame-index runtime)
-                       (1- (length durations))))
-           (delay (/ (float (nth index durations)) 1000.0)))
-      (setf (agent-shell-pet--runtime-timer runtime)
-            (run-at-time delay nil #'agent-shell-pet--tick runtime)))))
+    (unless (and (eq (agent-shell-pet--runtime-renderer runtime) 'child-frame)
+                 (image-type-available-p 'webp))
+      (let* ((durations (agent-shell-pet--state-durations
+                         (agent-shell-pet--runtime-state runtime)))
+             (index (min (agent-shell-pet--runtime-frame-index runtime)
+                         (1- (length durations))))
+             (delay (/ (float (nth index durations)) 1000.0)))
+        (setf (agent-shell-pet--runtime-timer runtime)
+              (run-at-time delay nil #'agent-shell-pet--tick runtime))))))
 
 (defun agent-shell-pet--state-default-text (state)
   "Return default status text for STATE."
